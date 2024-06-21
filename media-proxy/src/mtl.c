@@ -291,32 +291,19 @@ static int rx_st20p_query_ext_frame(void* priv, struct st_ext_frame* ext_frame,
     memif_buffer_t* rx_bufs = rx_ctx->shm_bufs;
 
     if (rx_ctx->shm_ready == 0) {
-        ERROR("rx_st20p_query_ext_frame: MemIF connection not ready.");
         return -1;
     }
 
     err = memif_buffer_alloc(rx_ctx->memif_conn, qid, rx_bufs, buf_num, &rx_buf_num, buf_size);
     if (err != MEMIF_ERR_SUCCESS) {
-        INFO("rx_st20p_query_ext_frame: Failed to alloc memif buffer: %s", memif_strerror(err));
+        INFO("Failed to alloc memif buffer: %s", memif_strerror(err));
         return -1;
     }
 
-    // ext_frame->linesize[0] = st_frame_least_linesize(ST_FRAME_FMT_YUV422PLANAR10LE, meta->width ,0);
+    ext_frame->addr[0] = rx_bufs->data;
     // ext_frame->buf_iova = rx_ctx->frames_begin_iova + ((uint8_t*)rx_bufs->data - (uint8_t*)rx_ctx->frames_begin_addr);
-    // ext_frame->iova[0] = rx_ctx->source_begin_iova + ((uint8_t*)rx_bufs->data - rx_ctx->source_begin);
-    ext_frame->size = rx_ctx->frame_size;
-
-    uint8_t planes = st_frame_fmt_planes(rx_ctx->output_fmt);
-    for (uint8_t plane = 0; plane < planes; plane++) { /* assume planes continuous */
-        ext_frame->linesize[plane] = st_frame_least_linesize(rx_ctx->output_fmt, meta->width, plane);
-        if (plane == 0) {
-            ext_frame->addr[plane] = rx_bufs->data;
-            ext_frame->iova[plane] = rx_ctx->source_begin_iova + ((uint8_t*)rx_bufs->data - rx_ctx->source_begin);
-        } else {
-            ext_frame->addr[plane] = (uint8_t*)ext_frame->addr[plane - 1] + ext_frame->linesize[plane - 1] * meta->height;
-            ext_frame->iova[plane] = ext_frame->iova[plane - 1] + ext_frame->linesize[plane - 1] * meta->height;
-        }
-    }
+    ext_frame->iova[0] = rx_ctx->source_begin_iova + ((uint8_t*)rx_bufs->data - rx_ctx->source_begin);
+    ext_frame->size = rx_bufs->len;
 
     /* save your private data here get it from st_frame.opaque */
     ext_frame->opaque = rx_bufs;
@@ -1792,8 +1779,10 @@ rx_session_context_t* mtl_st20p_rx_session_create(mtl_handle dev_handle, struct 
     ops_rx.priv = rx_ctx; // app handle register to lib
     ops_rx.notify_frame_available = rx_st20p_frame_available;
 
-    // TO-DO: Frame size probably should be choosen greater one from output and transport
-    rx_ctx->frame_size = st_frame_size(ops_rx.output_fmt, ops_rx.width, ops_rx.height, false);
+    size_t output_buff_size = st_frame_size(ops_rx.output_fmt, ops_rx.width, ops_rx.height, false);
+    size_t transport_buff_size = st20_frame_size(ops_rx.transport_fmt, ops_rx.width, ops_rx.height);
+
+    rx_ctx->frame_size = output_buff_size > transport_buff_size ? output_buff_size : transport_buff_size;
     rx_ctx->width = ops_rx.width;
     rx_ctx->height = ops_rx.height;
     rx_ctx->output_fmt = ops_rx.output_fmt;
