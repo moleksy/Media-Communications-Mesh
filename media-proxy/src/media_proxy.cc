@@ -19,6 +19,12 @@
 
 #include <execinfo.h>
 #include <dlfcn.h>
+#include "mesh/conn_rdma_rx.h"
+#include "mesh/conn_rdma_tx.h"
+#include <vector>
+#include <tuple>
+#include <iomanip>
+#include <thread>
 
 #ifndef IMTL_CONFIG_PATH
 #define IMTL_CONFIG_PATH "./imtl.json"
@@ -88,6 +94,77 @@ void SignalHandler(int signal) {
 
 using namespace mesh;
 
+class EmulatedReceiver : public connection::Connection
+{
+  public:
+    EmulatedReceiver(context::Context& ctx)
+    {
+        _kind = connection::Kind::receiver;
+        set_state(ctx, connection::State::configured);
+    }
+
+    connection::Result on_establish(context::Context& ctx) override
+    {
+        set_state(ctx, connection::State::active);
+        return connection::Result::success;
+    }
+
+    connection::Result on_shutdown(context::Context& ctx) override
+    {
+        return connection::Result::success;
+    }
+
+    connection::Result on_receive(context::Context& ctx, void *ptr, uint32_t sz,
+                                  uint32_t& sent) override
+    {
+        log::info("Data received");
+        return connection::Result::success;
+    }
+
+    connection::Result configure(context::Context& ctx)
+    {
+        set_state(ctx, connection::State::configured);
+        return connection::Result::success;
+    }
+};
+
+class EmulatedTransmitter : public connection::Connection
+{
+  public:
+    EmulatedTransmitter(context::Context& ctx)
+    {
+        _kind = connection::Kind::transmitter;
+        set_state(ctx, connection::State::configured);
+    }
+
+    connection::Result on_establish(context::Context& ctx) override
+    {
+        set_state(ctx, connection::State::active);
+        return connection::Result::success;
+    }
+
+    connection::Result on_shutdown(context::Context& ctx) override
+    {
+        return connection::Result::success;
+    }
+
+    connection::Result configure(context::Context& ctx)
+    {
+        set_state(ctx, connection::State::configured);
+        return connection::Result::success;
+    }
+
+    connection::Result transmit_plaintext(context::Context& ctx,
+                                          const void *ptr, size_t sz)
+    {
+        // Cast const void* to void* safely for transmit
+        return transmit(ctx, const_cast<void *>(ptr), sz);
+    }
+};
+
+const size_t payload_sizes[] = {1024, 1 << 20, 8 << 20}; // 1 KB, 1 MB, 8 MB
+const int queue_sizes[] = {1, 8, 32}; // Different queue sizes
+
 // Main context with cancellation
 auto ctx = context::WithCancel(context::Background());
 
@@ -146,70 +223,216 @@ int main(int argc, char* argv[])
         return 0;
     }
 
-    log::setFormatter(std::make_unique<log::StandardFormatter>());
-    log::info("Media Proxy started");
+    // Declare mDevHandle
+    libfabric_ctx *mDevHandle = nullptr;
 
-    if (getenv("KAHAWAI_CFG_PATH") == NULL) {
-        log::debug("Set MTL configure file path to %s", IMTL_CONFIG_PATH);
-        setenv("KAHAWAI_CFG_PATH", IMTL_CONFIG_PATH, 0);
+    log::info("Configuring connection parameters")("grpc_port", grpc_port)("tcp_port", tcp_port);
+
+    mcm_conn_param request = {};
+    {
+        // Initialize request based on tcp_port
+        if (tcp_port == "8002") {
+            request.type = is_rx;
+            // Ensure the string length does not exceed the destination buffer size
+            if (dp_ip.size() >= sizeof(request.local_addr.ip)) {
+                log::error("IP address is too long to fit in the local_addr.ip field");
+                return 1; // Handle the error as needed
+            }
+
+            // Copy dp_ip into request.local_addr.ip
+            std::strncpy(request.local_addr.ip, dp_ip.c_str(), sizeof(request.local_addr.ip) - 1);
+            request.local_addr.ip[sizeof(request.local_addr.ip) - 1] =
+                '\0'; // Null-terminate the string
+            request.local_addr = {.port = "8002"};
+        } else {
+            request.type = is_tx;
+                        // Ensure the string length does not exceed the destination buffer size
+            if (dp_ip.size() >= sizeof(request.local_addr.ip)) {
+                log::error("IP address is too long to fit in the local_addr.ip field");
+                return 1; // Handle the error as needed
+            }
+
+            // Copy dp_ip into request.local_addr.ip
+            std::strncpy(request.remote_addr.ip, dp_ip.c_str(), sizeof(request.remote_addr.ip) - 1);
+            request.remote_addr.ip[sizeof(request.remote_addr.ip) - 1] =
+                '\0'; // Null-terminate the string
+            request.remote_addr = {.port = "8002"};
+        }
+
+        // Initialize other required fields of request
+        // request.payload_type = PAYLOAD_TYPE_ST20_VIDEO;
+        // request.payload_codec = PAYLOAD_CODEC_NONE;
+        // Initialize payload_args if needed
+        request.payload_args.rdma_args.transfer_size =
+            4*1024*1024; // Example transfer size
+        request.payload_args.rdma_args.queue_size = 32;
+        // request.width = 1920;
+        // request.height = 1080;
+        // request.fps = 30;
+        // request.pix_fmt = PIX_FMT_YUV422P_10BIT_LE;
+        // request.payload_type_nr = 0;
+        // request.payload_mtl_flags_mask = 0;
+        // request.payload_mtl_pacing = 0;
     }
 
-    ProxyContext* proxy_ctx = new ProxyContext("0.0.0.0:" + grpc_port, "0.0.0.0:" + tcp_port);
-    proxy_ctx->setDevicePort(dev_port);
-    proxy_ctx->setDataPlaneAddress(dp_ip);
-
-    // Intercept shutdown signals to cancel the main context
+        // Intercept shutdown signals to cancel the main context
     auto signal_handler = [](int sig) {
         if (sig == SIGINT || sig == SIGTERM) {
-            log::info("Shutdown signal received");
+            log::info("Shutdown signal received")("signal", sig);
             ctx.cancel();
         }
     };
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    // mesh::Experiment3(ctx);
+        connection::Result res;
 
-    // Start ProxyAPI client
-    RunProxyAPIClient(ctx);
+    if (tcp_port == "8002") {
+        log::info("Starting RX Path");
+        EmulatedReceiver *emulated_rx = new EmulatedReceiver(ctx);
+        emulated_rx->configure(ctx);
+        emulated_rx->establish(ctx);
 
-    // Start metrics collector
-    std::thread metricsCollectorThread([&]() {
-        telemetry::MetricsCollector collector;
-        collector.run(ctx);
+        // Setup Rx connection
+        connection::RdmaRx *conn_rx = new connection::RdmaRx();
+        log::info("Configuring RDMA RX connection");
+        res = conn_rx->configure(ctx, request, mDevHandle);
+        if (res != connection::Result::success) {
+            log::error("Failed to configure RDMA RX connection")(
+                "result", connection::result2str(res));
+            delete conn_rx;
+            delete emulated_rx;
+            return 1;
+        }
+
+        log::info("Establishing RDMA RX connection...");
+        try {
+            res = conn_rx->establish(ctx);
+            if (res == connection::Result::error_already_initialized) {
+                log::debug(
+                    "RDMA RX connection is already initialized. Continuing...");
+                // Continue execution as the connection is already in an
+                // established state
+            } else if (res != connection::Result::success) {
+                log::error("Failed to establish RDMA RX connection")(
+                    "result", connection::result2str(res));
+                delete conn_rx;
+                delete emulated_rx;
+                return 1;
+            }
+        } catch (const std::exception& e) {
+            log::fatal("Exception during RDMA RX establishment")("error",
+                                                                 e.what());
+            delete conn_rx;
+            delete emulated_rx;
+            return 1;
+        }
+
+        log::info("Linking RDMA RX to Emulated Receiver...");
+        conn_rx->set_link(ctx, emulated_rx);
+
+        int sleep_duration = 600000;
+        log::info("Sleeping to allow RX processing")("duration_ms",sleep_duration);
+        mesh::thread::Sleep(ctx, std::chrono::milliseconds(sleep_duration));
+
+        log::info("Shutting down RDMA RX connection...");
+        // Shutdown Rx connection
+        res = conn_rx->shutdown(ctx);
+        if (res != connection::Result::success) {
+            log::error("Failed to shut down RDMA RX connection")(
+                       "result", mesh::connection::result2str(res));
+        }
+
+        delete conn_rx;
+        delete emulated_rx;
+
+        log::info("RX Path completed.");
+
+    } else {
+    log::info("Starting TX Path");
+    connection::RdmaTx *conn_tx = new connection::RdmaTx();
+    EmulatedTransmitter *emulated_tx = new EmulatedTransmitter(ctx);
+
+    log::info("Configuring RDMA TX connection");
+    res = conn_tx->configure(ctx, request, mDevHandle);
+    if (res != connection::Result::success) {
+        log::error("Failed to configure RDMA TX connection")("result", connection::result2str(res));
+        delete conn_tx;
+        delete emulated_tx;
+        return 1;
+    }
+
+    log::info("Establishing RdmaTx connection...");
+    res = conn_tx->establish(ctx);
+    if (res != connection::Result::success) {
+        log::error("Failed to establish RDMA TX connection")("result", connection::result2str(res));
+        delete conn_tx;
+        delete emulated_tx;
+        return 1;
+    }
+
+    log::info("Configuring EmulatedTransmitter...");
+    res = emulated_tx->configure(ctx);
+    if (res != connection::Result::success) {
+        log::error("Configure EmulatedTransmitter failed")("result", connection::result2str(res));
+        delete conn_tx;
+        delete emulated_tx;
+        return 1;
+    }
+
+    log::info("Establishing EmulatedTransmitter...");
+    res = emulated_tx->establish(ctx);
+    if (res != connection::Result::success) {
+        log::error("Establish EmulatedTransmitter failed")("result", connection::result2str(res));
+        delete conn_tx;
+        delete emulated_tx;
+        return 1;
+    }
+
+    log::info("Linking EmulatedTransmitter with RdmaTx...");
+    emulated_tx->set_link(ctx, conn_tx);
+
+    size_t data_size = 4 * 1024 * 1024;
+    char *test_data = new char[data_size];
+    std::fill(test_data, test_data + data_size, 0); // Zero-initialize the buffer
+    std::strcpy(test_data, "Hello RDMA World!");
+
+    // Transmitter thread
+    std::thread transmitter_thread([&, emulated_tx, test_data, data_size]() {
+        try {
+            for (int i = 0; i < 5000; ++i) {
+                if (ctx.cancelled()) {
+                    break;
+                }
+                log::info("Transmitting data")("iteration", i + 1);
+                emulated_tx->transmit_plaintext(ctx, test_data, data_size);
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+        } catch (const std::exception &e) {
+            log::error("Exception in transmitter thread")("message", e.what());
+        } catch (...) {
+            log::error("Unknown exception in transmitter thread");
+        }
     });
 
-    /* start TCP server */
-    std::thread tcpThread(RunTCPServer, proxy_ctx);
+    thread::Sleep(ctx, std::chrono::milliseconds(100000));
+    res = conn_tx->shutdown(ctx);
+    transmitter_thread.join(); // Ensure the thread finishes before cleanup
 
-    // Start SDK API server
-    auto sdk_ctx = context::WithCancel(context::Background());
-    std::thread sdkApiThread([&]() { RunSDKAPIServer(sdk_ctx); });
+    log::info("Shutting down RDMA TX connection...");
 
-    // Wait until the main context is cancelled
-    ctx.done();
+    if (res != connection::Result::success) {
+        log::error("Shutdown TX failed")("result", connection::result2str(res));
+    }
 
-    // Stop Local connection manager
-    log::info("Shutting down Local conn manager");
-    auto tctx = context::WithTimeout(context::Background(),
-                                      std::chrono::milliseconds(3000));
-    connection::local_manager.shutdown(ctx);
+    delete[] test_data;
+    delete conn_tx;
+    delete emulated_tx;
 
-    metricsCollectorThread.join();
+    log::info("TX Path completed.");
+}
 
-    // Shutdown ProxyAPI client
-    proxyApiClient->Shutdown();
-
-    // Shutdown SDK API server
-    sdk_ctx.cancel();
-    sdkApiThread.join();
-
-    log::info("Media Proxy exited");
-    exit(0);
-
-    tcpThread.join();
-
-    delete (proxy_ctx);
+    log::info("Application exited gracefully");
 
     return 0;
 }

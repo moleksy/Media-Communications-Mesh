@@ -16,7 +16,7 @@ SCRIPT_DIR="$(readlink -f "$(dirname -- "${BASH_SOURCE[0]}")")"
 # To disable the building of unit tests, set the value to "OFF".
 
 MCM_BUILD_DIR="${MCM_BUILD_DIR:-${BUILD_DIR}/mcm}"
-BUILD_TYPE="${BUILD_TYPE:-Release}"
+BUILD_TYPE="${BUILD_TYPE:-Debug}"
 BUILD_UNIT_TESTS="${BUILD_UNIT_TESTS:-ON}"
 INSTALL_PREFIX="${INSTALL_PREFIX:-/usr/local}"
 
