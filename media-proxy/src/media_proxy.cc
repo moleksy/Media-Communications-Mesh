@@ -243,7 +243,8 @@ int main(int argc, char* argv[])
             std::strncpy(request.local_addr.ip, dp_ip.c_str(), sizeof(request.local_addr.ip) - 1);
             request.local_addr.ip[sizeof(request.local_addr.ip) - 1] =
                 '\0'; // Null-terminate the string
-            request.local_addr = {.port = "8002"};
+        // Convert port number to string and copy it into request.local_addr.port
+        std::snprintf(request.local_addr.port, sizeof(request.local_addr.port), "%d", 8002);
         } else {
             request.type = is_tx;
                         // Ensure the string length does not exceed the destination buffer size
@@ -256,7 +257,8 @@ int main(int argc, char* argv[])
             std::strncpy(request.remote_addr.ip, dp_ip.c_str(), sizeof(request.remote_addr.ip) - 1);
             request.remote_addr.ip[sizeof(request.remote_addr.ip) - 1] =
                 '\0'; // Null-terminate the string
-            request.remote_addr = {.port = "8002"};
+        // Convert port number to string and copy it into request.remote_addr.port
+        std::snprintf(request.remote_addr.port, sizeof(request.remote_addr.port), "%d", 8002);
         }
 
         // Initialize other required fields of request
