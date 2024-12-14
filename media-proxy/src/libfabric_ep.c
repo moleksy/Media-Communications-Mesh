@@ -282,6 +282,9 @@ int ep_init(ep_ctx_t **ep_ctx, ep_cfg_t *cfg)
     hints->dest_addrlen = 0;
 
     char if_name[IF_NAMESIZE];
+    //---------------FOR TX YOU NEED TO SET THIS TO THE IP FROM WHICH DATA WIL BE SENT--------------
+    // cfg->local_addr.ip
+    //----------------------------------------------------------------------------------------------
 
     if (cfg->dir == RX) {
         if (get_interface_name_by_ip(cfg->local_addr.ip, if_name, sizeof(if_name)) == 0) {
@@ -289,15 +292,26 @@ int ep_init(ep_ctx_t **ep_ctx, ep_cfg_t *cfg)
         } else {
             printf("Interface for IP %s not found\n", cfg->local_addr.ip);
         }
+
         hints->domain_attr->name = strdup(if_name);
         ret = fi_getinfo(FI_VERSION(1, 21), cfg->local_addr.ip, cfg->local_addr.port, FI_SOURCE,
                          hints, &fi);
     } else {
-        if (get_interface_name_by_ip(cfg->remote_addr.ip, if_name, sizeof(if_name)) == 0) {
-            printf("Interface for IP %s is: %s\n", cfg->remote_addr.ip, if_name);
+        if (get_interface_name_by_ip(cfg->local_addr.ip, if_name, sizeof(if_name)) == 0) {
+            printf("Interface for IP %s is: %s\n", cfg->local_addr.ip, if_name);
         } else {
-            printf("Interface for IP %s not found\n", cfg->remote_addr.ip);
+            printf("Interface for IP %s not found\n", cfg->local_addr.ip);
         }
+
+        struct sockaddr_in local_sockaddr;
+        memset(&local_sockaddr, 0, sizeof(local_sockaddr));
+        local_sockaddr.sin_family = AF_INET;
+        local_sockaddr.sin_port = htons(0); // Any available port
+        inet_pton(AF_INET, cfg->local_addr.ip, &local_sockaddr.sin_addr);
+
+        hints->src_addr = (void *)&local_sockaddr;
+        hints->src_addrlen = sizeof(local_sockaddr);
+
         hints->domain_attr->name = strdup(if_name);
         ret = fi_getinfo(FI_VERSION(1, 21), cfg->remote_addr.ip, cfg->remote_addr.port, 0, hints,
                          &fi);
