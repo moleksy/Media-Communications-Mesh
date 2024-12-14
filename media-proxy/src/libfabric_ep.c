@@ -282,7 +282,7 @@ int ep_init(ep_ctx_t **ep_ctx, ep_cfg_t *cfg)
     hints->dest_addrlen = 0;
 
     char if_name[IF_NAMESIZE];
-    //---------------FOR TX YOU NEED TO SET THIS TO THE IP FROM WHICH DATA WIL BE SENT--------------
+    //---------------FOR TX YOU NEED TO SET THIS TO THE IP FROM WHICH DATA WILL BE SENT--------------
     // cfg->local_addr.ip
     //----------------------------------------------------------------------------------------------
 

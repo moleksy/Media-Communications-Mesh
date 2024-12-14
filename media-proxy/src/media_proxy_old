@@ -117,7 +117,7 @@ class EmulatedReceiver : public connection::Connection
     connection::Result on_receive(context::Context& ctx, void *ptr, uint32_t sz,
                                   uint32_t& sent) override
     {
-        //log::info("Data received");
+        log::info("Data received");
         return connection::Result::success;
     }
 
@@ -247,14 +247,11 @@ int main(int argc, char* argv[])
         std::snprintf(request.local_addr.port, sizeof(request.local_addr.port), "%d", 8002);
         } else {
             request.type = is_tx;
-
-            // Ensure the string length does not exceed the destination buffer size
-            // if (dp_ip.size() >= sizeof(request.local_addr.ip)) {
-            //     log::error("IP address is too long to fit in the local_addr.ip field");
-            //     return 1; // Handle the error as needed
-            // }
-            request.local_addr = {.ip = "192.168.1.21", .port = "8002"};
-
+                        // Ensure the string length does not exceed the destination buffer size
+            if (dp_ip.size() >= sizeof(request.local_addr.ip)) {
+                log::error("IP address is too long to fit in the local_addr.ip field");
+                return 1; // Handle the error as needed
+            }
 
             // Copy dp_ip into request.local_addr.ip
             std::strncpy(request.remote_addr.ip, dp_ip.c_str(), sizeof(request.remote_addr.ip) - 1);
@@ -269,7 +266,7 @@ int main(int argc, char* argv[])
         // request.payload_codec = PAYLOAD_CODEC_NONE;
         // Initialize payload_args if needed
         request.payload_args.rdma_args.transfer_size =
-            3840 * 2160 * 4; // Example transfer size
+            4*1024*1024; // Example transfer size
         request.payload_args.rdma_args.queue_size = 32;
         // request.width = 1920;
         // request.height = 1080;
@@ -354,126 +351,88 @@ int main(int argc, char* argv[])
         log::info("RX Path completed.");
 
     } else {
-// Transmit bulk data in various payload sizes
-log::info("Starting TX Path");
+        
+    log::info("Starting TX Path");
+    connection::RdmaTx *conn_tx = new connection::RdmaTx();
+    EmulatedTransmitter *emulated_tx = new EmulatedTransmitter(ctx);
 
-const size_t payload_sizes[] = {1 << 20, 8 << 20, 3840 * 2160 * 4}; // 1 MB, 8 MB, ~32 MB
-const int queue_sizes[] = {1, 8, 32}; // Queue sizes to test
-const size_t total_data_size = 16L * 1024 * 1024 * 1024; // 16 GB
-const size_t num_iterations = 1000;
-const char filler = 'A'; // Filler character for payload
-
-// Store results for latency and bandwidth
-std::vector<std::tuple<double, size_t, double, double>> results; // Payload Size (MB), Queue Size, Latency (ms), Bandwidth (GB/s)
-
-for (size_t queue_size : queue_sizes) {
-    for (size_t payload_size : payload_sizes) {
-        // Setup RDMA TX Connection
-        connection::RdmaTx *conn_tx = new connection::RdmaTx();
-        EmulatedTransmitter *emulated_tx = new EmulatedTransmitter(ctx);
-
-        // Update request with payload size and queue size
-        request.payload_args.rdma_args.transfer_size = payload_size;
-        request.payload_args.rdma_args.queue_size = queue_size;
-
-        log::info("Configuring RDMA TX connection")("payload_size", payload_size)("queue_size", queue_size);
-        auto res = conn_tx->configure(ctx, request, mDevHandle);
-        if (res != connection::Result::success) {
-            log::error("Failed to configure RDMA TX connection")("result", connection::result2str(res));
-            delete conn_tx;
-            delete emulated_tx;
-            continue;
-        }
-
-        log::info("Establishing RdmaTx connection...");
-        res = conn_tx->establish(ctx);
-        if (res != connection::Result::success) {
-            log::error("Failed to establish RDMA TX connection")("result",
-                                                                 connection::result2str(res));
-            delete conn_tx;
-            delete emulated_tx;
-            continue;
-        }
-
-        log::info("Configuring EmulatedTransmitter...");
-        res = emulated_tx->configure(ctx);
-        if (res != connection::Result::success) {
-            log::error("Configure EmulatedTransmitter failed")("result",
-                                                               connection::result2str(res));
-            delete conn_tx;
-            delete emulated_tx;
-            continue;
-        }
-
-        log::info("Establishing EmulatedTransmitter...");
-        res = emulated_tx->establish(ctx);
-        if (res != connection::Result::success) {
-            log::error("Establish EmulatedTransmitter failed")("result",
-                                                               connection::result2str(res));
-            delete conn_tx;
-            delete emulated_tx;
-            return 1;
-        }
-
-        log::info("Linking EmulatedTransmitter with RdmaTx...");
-        emulated_tx->set_link(ctx, conn_tx);
-
-        std::vector<char> test_data(payload_size, filler);
-
-        // Measure latency for a single transmission
-        double total_latency_ms = 0.0;
-
-        for (size_t i = 0; i < num_iterations; ++i) {
-            auto start = std::chrono::high_resolution_clock::now();
-
-            emulated_tx->transmit_plaintext(ctx, test_data.data(), payload_size);
-            auto end = std::chrono::high_resolution_clock::now();
-            std::chrono::duration<double, std::milli> elapsed = end - start;
-
-            total_latency_ms += elapsed.count();
-        }
-
-        // Calculate average latency per operation
-        double avg_latency_ms = total_latency_ms / num_iterations;
-
-        // Measure bandwidth
-        size_t num_bandwidth_iterations = total_data_size / payload_size;
-        auto start = std::chrono::high_resolution_clock::now();
-
-        for (size_t i = 0; i < num_bandwidth_iterations; ++i) {
-            emulated_tx->transmit_plaintext(ctx, test_data.data(), payload_size);
-        }
-
-        auto end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> elapsed = end - start;
-
-        // Calculate transfer rate
-        double transfer_rate_gbps = (static_cast<double>(payload_size) * num_bandwidth_iterations) / (elapsed.count() * 1024 * 1024 * 1024);
-
-        // Store results (convert payload size to MB)
-        results.emplace_back(static_cast<double>(payload_size) / (1024 * 1024), queue_size, avg_latency_ms, transfer_rate_gbps);
-
-        // Cleanup RDMA connections
+    log::info("Configuring RDMA TX connection");
+    res = conn_tx->configure(ctx, request, mDevHandle);
+    if (res != connection::Result::success) {
+        log::error("Failed to configure RDMA TX connection")("result", connection::result2str(res));
         delete conn_tx;
         delete emulated_tx;
+        return 1;
     }
-}
 
-// Display results in a tabular format
-std::cout << "\n+-------------------+-------------+--------------------+----------------------+" << std::endl;
-std::cout << "| Payload Size (MB) | Queue Size  |    Latency (ms)    | Transfer Rate (GB/s) |" << std::endl;
-std::cout << "+-------------------+-------------+--------------------+----------------------+" << std::endl;
-for (const auto &result : results) {
-    std::cout << "| " << std::setw(17) << std::fixed << std::setprecision(2) << std::get<0>(result)
-              << " | " << std::setw(11) << std::get<1>(result)
-              << " | " << std::setw(18) << std::fixed << std::setprecision(3) << std::get<2>(result)
-              << " | " << std::setw(20) << std::fixed << std::setprecision(3) << std::get<3>(result)
-              << " |" << std::endl;
-}
-std::cout << "+-------------------+-------------+--------------------+----------------------+" << std::endl;
+    log::info("Establishing RdmaTx connection...");
+    res = conn_tx->establish(ctx);
+    if (res != connection::Result::success) {
+        log::error("Failed to establish RDMA TX connection")("result", connection::result2str(res));
+        delete conn_tx;
+        delete emulated_tx;
+        return 1;
+    }
 
-log::info("TX Path completed.");
+    log::info("Configuring EmulatedTransmitter...");
+    res = emulated_tx->configure(ctx);
+    if (res != connection::Result::success) {
+        log::error("Configure EmulatedTransmitter failed")("result", connection::result2str(res));
+        delete conn_tx;
+        delete emulated_tx;
+        return 1;
+    }
 
+    log::info("Establishing EmulatedTransmitter...");
+    res = emulated_tx->establish(ctx);
+    if (res != connection::Result::success) {
+        log::error("Establish EmulatedTransmitter failed")("result", connection::result2str(res));
+        delete conn_tx;
+        delete emulated_tx;
+        return 1;
+    }
+
+    log::info("Linking EmulatedTransmitter with RdmaTx...");
+    emulated_tx->set_link(ctx, conn_tx);
+
+    size_t data_size = 4 * 1024 * 1024;
+    char *test_data = new char[data_size];
+    std::fill(test_data, test_data + data_size, 0); // Zero-initialize the buffer
+    std::strcpy(test_data, "Hello RDMA World!");
+
+    // Transmitter thread
+    std::thread transmitter_thread([&, emulated_tx, test_data, data_size]() {
+        try {
+            for (int i = 0; i < 5000; ++i) {
+                if (ctx.cancelled()) {
+                    break;
+                }
+                log::info("Transmitting data")("iteration", i + 1);
+                emulated_tx->transmit_plaintext(ctx, test_data, data_size);
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+        } catch (const std::exception &e) {
+            log::error("Exception in transmitter thread")("message", e.what());
+        } catch (...) {
+            log::error("Unknown exception in transmitter thread");
+        }
+    });
+
+    thread::Sleep(ctx, std::chrono::milliseconds(100000));
+    res = conn_tx->shutdown(ctx);
+    transmitter_thread.join(); // Ensure the thread finishes before cleanup
+
+    log::info("Shutting down RDMA TX connection...");
+
+    if (res != connection::Result::success) {
+        log::error("Shutdown TX failed")("result", connection::result2str(res));
+    }
+
+    delete[] test_data;
+    delete conn_tx;
+    delete emulated_tx;
+
+    log::info("TX Path completed.");
 }
 
     log::info("Application exited gracefully");
