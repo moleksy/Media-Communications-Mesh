@@ -124,7 +124,8 @@ int rdma_init(libfabric_ctx **ctx)
     hints->tx_attr->tclass = FI_TC_BULK_DATA;
     hints->domain_attr->resource_mgmt = FI_RM_ENABLED;
     hints->mode = FI_OPT_ENDPOINT;
-
+    hints->tx_attr->size = 32; // Transmit queue size
+    hints->rx_attr->size = 32; // Receive queue size
 
     ret = rdma_init_fabric(*ctx, hints);
     rdma_freehints(hints);

@@ -162,9 +162,6 @@ class EmulatedTransmitter : public connection::Connection
     }
 };
 
-const size_t payload_sizes[] = {1024, 1 << 20, 8 << 20}; // 1 KB, 1 MB, 8 MB
-const int queue_sizes[] = {1, 8, 32}; // Different queue sizes
-
 // Main context with cancellation
 auto ctx = context::WithCancel(context::Background());
 
@@ -448,14 +445,23 @@ for (size_t queue_size : queue_sizes) {
         std::chrono::duration<double> elapsed = end - start;
 
         // Calculate transfer rate
-        double transfer_rate_gbps = (static_cast<double>(payload_size) * num_bandwidth_iterations) / (elapsed.count() * 1024 * 1024 * 1024);
+        double transfer_rate_gbps = (static_cast<double>(payload_size) * num_bandwidth_iterations) /
+                                    (elapsed.count() * 1024 * 1024 * 1024);
 
         // Store results (convert payload size to MB)
-        results.emplace_back(static_cast<double>(payload_size) / (1024 * 1024), queue_size, avg_latency_ms, transfer_rate_gbps);
+        results.emplace_back(static_cast<double>(payload_size) / (1024 * 1024), queue_size,
+                             avg_latency_ms, transfer_rate_gbps);
 
         // Cleanup RDMA connections
+        res = conn_tx->shutdown(ctx);
+        if (res != connection::Result::success) {
+            log::error("Failed to shut down RDMA RX connection")("result",
+                                                                 mesh::connection::result2str(res));
+        }
+        res = conn_tx->shutdown(ctx);
         delete conn_tx;
         delete emulated_tx;
+        sleep(1); // Sleep for a second to allow resources to be released
     }
 }
 
